@@ -115,7 +115,7 @@ int main(void)
         reset(exid);f.fail_call=45;f.cleanup_fail=1;
         CHECK(attach()!=ArmSmmu4KSuccess && result.must_retain_resources);isolated(exid);
         /* Every global/context/route refusal must precede any register write. */
-        for(unsigned control=0;control<16;++control) {
+        for(unsigned control=0;control<17;++control) {
             reset(exid);
             switch(control) {
             case 0:memory[0]|=1;break;case 1:memory[0]&=~0x400;break;case 2:memory[0]^=8;break;
@@ -130,11 +130,16 @@ int main(void)
             case 13:memory[0xc00/4]=(exid?1u<<10:0)|2;break;
             case 14:memory[0]&=~2u;break;   /* no global fault reporting */
             case 15:memory[0]&=~4u;break;   /* no global fault interrupt */
+            case 16:memory[0xc08/4]=0xffu;break;   /* claimed slot translating (to bank 0xff) */
             }
             CHECK(attach()!=ArmSmmu4KSuccess && !f.writes && !state.attempted && result.must_retain_resources);
         }
         /* Configuration-access fault reporting clear, as the sheng Adreno SMMU firmware leaves it (0x002f0406). */
         reset(exid);memory[0]&=~0x30u;
+        CHECK(!attach() && state.attached);
+        /* Claimed slots of type FAULT with other fields, as firmware that ignores FAULT writes leaves them (tb128fu-028 read
+         * 0x001200ff and, after a BYPASS write, 0x000200ff). */
+        reset(exid);memory[0xc08/4]=0x001200ffu;memory[0xc10/4]=0x000200ffu;
         CHECK(!attach() && state.attached);
         reset(exid);
         CHECK(!ArmSmmu4KCheckFaultedStreams(&io,routes,2,2,&result) && !f.writes);
@@ -151,5 +156,5 @@ int main(void)
         memory[0xc08/4]^=1;
         CHECK(ArmSmmu4KFaultStreams(&io,&state,&result)==ArmSmmu4KStateMismatch && f.writes==writes);
     }
-    printf("PASS: legacy/EXIDS stream attachment and quarantine, %u per-call I/O failure cases, 32 pre-write refusals, 2 attachments without GCFGFRE/GCFGFIE, actual context readback and unrelated-route isolation (software registers only)\n",fault_cases);
+    printf("PASS: legacy/EXIDS stream attachment and quarantine, %u per-call I/O failure cases, 34 pre-write refusals, 2 attachments without GCFGFRE/GCFGFIE, 2 over fault slots with other fields, actual context readback and unrelated-route isolation (software registers only)\n",fault_cases);
 }
