@@ -40,7 +40,10 @@ static ArmSmmu4KStatus scan(const ArmSmmu4KIo *io,const ArmSmmu4KStream *s,unsig
             unsigned live=valid(r->id0,smr,s2cr);
             if(attached) {
                 if(smr!=(valid_smr(r->id0)|s[own].sid) || s2cr!=(bank|valid_s2cr(r->id0)))return ArmSmmu4KStateMismatch;
-            } else if((s2cr&~valid_s2cr(r->id0))!=FAULT ||
+            /* A slot to claim must route nothing: its S2CR type is FAULT. The other fields are not required to be
+             * zero: firmware that traps S2CR (the SM6225 GPU SMMU, tb128fu-028; mainline qcom_smmu_cfg_probe) ignores
+             * FAULT writes and turns BYPASS into FAULT, so such a slot keeps whatever bank and attributes it held. */
+            } else if((s2cr&(3u<<16))!=FAULT ||
                 (live && smr!=(valid_smr(r->id0)|s[own].sid)))return ArmSmmu4KBusy;
             ++r->streams_verified;
         } else if(valid(r->id0,smr,s2cr)) {
