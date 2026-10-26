@@ -5,7 +5,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-typedef struct {unsigned slot;uint16_t sid;} ArmSmmu4KStream;
+/* One stream match: the SMR slot, the stream ID and its SMR mask. Mask bits are ignored when the SMMU compares a
+ * stream ID (the devicetree iommus mask, e.g. <&adreno_smmu 0 0xc01>); 0 matches the ID exactly. */
+typedef struct {unsigned slot;uint16_t sid,mask;} ArmSmmu4KStream;
 typedef struct {
     unsigned attempted,attached,poisoned,count,bank;
     uint32_t id0,scr0;
