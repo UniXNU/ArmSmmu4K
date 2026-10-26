@@ -7,6 +7,11 @@ static int wr(const ArmSmmu4KIo *io,size_t at,uint32_t v,ArmSmmu4KStreamResult *
 {++r->writes;return io->write32(io->cookie,at,v);}
 static unsigned exids(uint32_t id){return (id>>8)&1;}
 static uint32_t valid_smr(uint32_t id){return exids(id)?0:UINT32_C(1)<<31;}
+/* SMR image of a stream: ID in [15:0], mask in [31:16] with EXIDS (valid in S2CR) or [30:16] with VALID in bit 31. */
+static uint32_t smr_of(uint32_t id,const ArmSmmu4KStream *s){return valid_smr(id)|(uint32_t)s->mask<<16|s->sid;}
+/* Two matches overlap when their IDs differ only in bits one of them ignores (Linux arm_smmu_find_sme). */
+static int overlaps(uint16_t a,uint16_t amask,uint16_t b,uint16_t bmask,uint32_t sidmask)
+{return !((uint32_t)(a^b)&~(uint32_t)(amask|bmask)&sidmask);}
 static uint32_t valid_s2cr(uint32_t id){return exids(id)?1u<<10:0;}
 static int valid(uint32_t id,uint32_t smr,uint32_t s2cr)
 {return exids(id)?!!(s2cr&(1u<<10)):!!(smr&(UINT32_C(1)<<31));}
@@ -27,8 +32,9 @@ static ArmSmmu4KStatus scan(const ArmSmmu4KIo *io,const ArmSmmu4KStream *s,unsig
 {
     unsigned slots=r->id0&255;uint32_t sidmask=exids(r->id0)?0xffffu:(1u<<((r->id0>>9)&15))-1;
     for(unsigned i=0;i<n;++i) {
-        if(s[i].slot>=slots || (s[i].sid&~sidmask))return ArmSmmu4KArgument;
-        for(unsigned j=0;j<i;++j)if(s[i].slot==s[j].slot || s[i].sid==s[j].sid)return ArmSmmu4KOverlap;
+        if(s[i].slot>=slots || (s[i].sid&~sidmask) || (s[i].mask&~sidmask))return ArmSmmu4KArgument;
+        for(unsigned j=0;j<i;++j)
+            if(s[i].slot==s[j].slot || overlaps(s[i].sid,s[i].mask,s[j].sid,s[j].mask,sidmask))return ArmSmmu4KOverlap;
     }
     r->streams_verified=0;
     for(unsigned slot=0;slot<slots;++slot) {
@@ -39,14 +45,14 @@ static ArmSmmu4KStatus scan(const ArmSmmu4KIo *io,const ArmSmmu4KStream *s,unsig
         if(own<n) {
             unsigned live=valid(r->id0,smr,s2cr);
             if(attached) {
-                if(smr!=(valid_smr(r->id0)|s[own].sid) || s2cr!=(bank|valid_s2cr(r->id0)))return ArmSmmu4KStateMismatch;
+                if(smr!=(smr_of(r->id0,&s[own])) || s2cr!=(bank|valid_s2cr(r->id0)))return ArmSmmu4KStateMismatch;
             } else if((s2cr&~valid_s2cr(r->id0))!=FAULT ||
-                (live && smr!=(valid_smr(r->id0)|s[own].sid)))return ArmSmmu4KBusy;
+                (live && smr!=(smr_of(r->id0,&s[own]))))return ArmSmmu4KBusy;
             ++r->streams_verified;
         } else if(valid(r->id0,smr,s2cr)) {
             if(!(s2cr&(3u<<16)) && (s2cr&255)==bank)return ArmSmmu4KBusy;
             uint32_t mask=(smr>>16)&(exids(r->id0)?0xffffu:0x7fffu),id=smr&0xffff;
-            for(unsigned i=0;i<n;++i)if(!((s[i].sid^id)&~mask&sidmask))return ArmSmmu4KOverlap;
+            for(unsigned i=0;i<n;++i)if(overlaps(s[i].sid,s[i].mask,(uint16_t)id,(uint16_t)mask,sidmask))return ArmSmmu4KOverlap;
         }
     }
     return ArmSmmu4KSuccess;
@@ -70,7 +76,7 @@ static int quarantine(const ArmSmmu4KIo *io,const ArmSmmu4KStreamState *state,un
          * handles an indeterminate/failed SMR publication without activating
          * an old or corrupted SID from an initially invalid slot. */
         size_t smr=0x800+4*state->streams[i].slot;
-        uint32_t match=valid_smr(state->id0)|state->streams[i].sid;
+        uint32_t match=smr_of(state->id0,&state->streams[i]);
         if(wr(io,at,FAULT,r) || io->barrier(io->cookie) || rd(io,at,&value,r) || value!=FAULT ||
             wr(io,smr,match,r) || io->barrier(io->cookie) || rd(io,smr,&value,r) || value!=match ||
             wr(io,at,FAULT|valid_s2cr(state->id0),r) || io->barrier(io->cookie) ||
@@ -108,7 +114,7 @@ ArmSmmu4KStatus ArmSmmu4KObserveOwnedStreams(const ArmSmmu4KIo *io,const ArmSmmu
     for(unsigned i=0;i<s->count;++i) {
         uint32_t smr,s2cr;
         if(rd(io,0x800+4*s->streams[i].slot,&smr,r) || rd(io,0xc00+4*s->streams[i].slot,&s2cr,r))return ArmSmmu4KIoError;
-        if(smr!=(valid_smr(r->id0)|s->streams[i].sid) || s2cr!=(s->bank|valid_s2cr(r->id0)))return ArmSmmu4KStateMismatch;
+        if(smr!=(smr_of(r->id0,&s->streams[i])) || s2cr!=(s->bank|valid_s2cr(r->id0)))return ArmSmmu4KStateMismatch;
         ++r->streams_verified;
     }
     return io->barrier(io->cookie)?ArmSmmu4KIoError:ArmSmmu4KSuccess;
@@ -133,8 +139,8 @@ ArmSmmu4KStatus ArmSmmu4KAttachStreams(const ArmSmmu4KIo *io,ArmSmmu4KStreamStat
          * installed. All masters are quiesced, and unmatched SIDs fault. */
         if(wr(io,s2cr,bank,r) || io->barrier(io->cookie) || rd(io,s2cr,&value,r)) {status=ArmSmmu4KIoError;goto failed;}
         if(value!=bank){status=ArmSmmu4KStateMismatch;goto failed;}
-        if(wr(io,smr,valid_smr(r->id0)|s[i].sid,r) || io->barrier(io->cookie) || rd(io,smr,&value,r)) {status=ArmSmmu4KIoError;goto failed;}
-        if(value!=(valid_smr(r->id0)|s[i].sid)){status=ArmSmmu4KStateMismatch;goto failed;}
+        if(wr(io,smr,smr_of(r->id0,&s[i]),r) || io->barrier(io->cookie) || rd(io,smr,&value,r)) {status=ArmSmmu4KIoError;goto failed;}
+        if(value!=(smr_of(r->id0,&s[i]))){status=ArmSmmu4KStateMismatch;goto failed;}
         if(exids(r->id0) && (wr(io,s2cr,bank|valid_s2cr(r->id0),r) || io->barrier(io->cookie))) {status=ArmSmmu4KIoError;goto failed;}
     }
     r->phase=3;status=observe(io,state,c,r);if(status)goto failed;

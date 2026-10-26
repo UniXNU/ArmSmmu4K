@@ -11,7 +11,7 @@ static uint32_t memory[BYTES/4];
 static struct {unsigned calls,fail_call,after,writes,events,corrupt,cleanup_fail;size_t at[1024];uint32_t value[1024];} f;
 static ArmSmmu4KIo io;
 static ArmSmmu4KStreamState state;
-static ArmSmmu4KStream routes[2]={{2,0},{4,1}};
+static ArmSmmu4KStream routes[2]={{2,0,0},{4,1,0}};
 static ArmSmmu4KStreamResult result;
 static uint64_t tables[2048];
 static ArmSmmu4KConfig lower={32,40,0x10000000,1};
@@ -150,6 +150,30 @@ int main(void)
         memory[CB/4]|=1u;CHECK(!ArmSmmu4KObserveOwnedStreams(&io,&state,&config,&result));
         memory[0xc08/4]^=1;
         CHECK(ArmSmmu4KFaultStreams(&io,&state,&result)==ArmSmmu4KStateMismatch && f.writes==writes);
+        /* Masked matches (devicetree iommus masks): the SMR carries the mask, as Linux's writer encodes it, and a mask
+         * widens what counts as an overlap with the other owned stream and with live routes. */
+        const ArmSmmu4KStream masked[2]={{2,0,8},{4,1,0}};
+        reset(exid);
+        CHECK(!ArmSmmu4KAttachStreams(&io,&state,masked,2,2,&config,&result) && state.attached && result.streams_verified==2);
+        {
+            uint32_t smr=(exid?0:1u<<31)|(8u<<16),s2cr=2|(exid?1u<<10:0);
+#ifdef SOURCE_ORACLE
+            source_stream(exid,0,8,1,2,&smr,&s2cr);
+#endif
+            CHECK(memory[0x808/4]==smr && memory[0xc08/4]==s2cr && memory[0x810/4]==((exid?0:1u<<31)|1));
+        }
+        writes=f.writes;
+        CHECK(!ArmSmmu4KObserveOwnedStreams(&io,&state,&config,&result) && f.writes==writes && result.streams_verified==2);
+        CHECK(!ArmSmmu4KFaultStreams(&io,&state,&result) && !state.attached);isolated(exid);
+        const ArmSmmu4KStream own_overlap[2]={{2,0,1},{4,1,0}};   /* 0 with mask 1 also matches 1 */
+        reset(exid);
+        CHECK(ArmSmmu4KAttachStreams(&io,&state,own_overlap,2,2,&config,&result)==ArmSmmu4KOverlap && !f.writes);
+        const ArmSmmu4KStream live_overlap[2]={{2,0,0},{4,1,8}};   /* 1 with mask 8 also matches the live route's 9 */
+        reset(exid);
+        CHECK(ArmSmmu4KAttachStreams(&io,&state,live_overlap,2,2,&config,&result)==ArmSmmu4KOverlap && !f.writes);
+        const ArmSmmu4KStream wide[2]={{2,0,0x10},{4,1,0}};   /* wider than 4 stream ID bits (NUMSIDB); EXIDS IDs are 16 bits */
+        reset(exid);
+        CHECK(ArmSmmu4KAttachStreams(&io,&state,wide,2,2,&config,&result)==(exid?ArmSmmu4KSuccess:ArmSmmu4KArgument));
     }
-    printf("PASS: legacy/EXIDS stream attachment and quarantine, %u per-call I/O failure cases, 32 pre-write refusals, 2 attachments without GCFGFRE/GCFGFIE, actual context readback and unrelated-route isolation (software registers only)\n",fault_cases);
+    printf("PASS: legacy/EXIDS stream attachment and quarantine, %u per-call I/O failure cases, 32 pre-write refusals, 2 attachments without GCFGFRE/GCFGFIE, masked matches and their overlaps, actual context readback and unrelated-route isolation (software registers only)\n",fault_cases);
 }
